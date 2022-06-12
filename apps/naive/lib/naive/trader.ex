@@ -3,6 +3,8 @@ defmodule Naive.Trader do
   require Logger
 
   alias Streamer.Binance.TradeEvent
+  alias Decimal, as: D
+  alias Naive.State
 
   def start_link(args) do
     GenServer.start_link(__MODULE__, args, name: :trader)
@@ -41,7 +43,7 @@ defmodule Naive.Trader do
   # Scenario 2 ~~~~~~~~~~~~~~~~
   def handle_cast(
         %TradeEvent{
-          buy_order_id: order_id,
+          buyer_order_id: order_id,
           quantity: quantity
         },
         %State{
@@ -65,27 +67,60 @@ defmodule Naive.Trader do
     {:ok, %Binance.OrderResponse{} = order} =
       Binance.order_limit_sell(symbol, quantity, sell_price, "GTC")
 
-      {:noreply, ${state: state | sell_order: order}}
+    {:noreply, %{state | sell_order: order}}
+  end
+
+  # Scenario 3 ~~~~~~~~~~~~~~~~
+
+  def handle_cast(
+        %TradeEvent{
+          seller_order_id: order_id,
+          quantity: quantity
+        },
+        %State{
+          sell_order: %Binance.OrderResponse{
+            order_id: order_id,
+            orig_qty: quantity
+          }
+        } = state
+      ) do
+    Logger.info("Trade finished, trader will now exit")
+    {:stop, :normal, state}
+  end
+
+  # Fallback scenario
+  def handle_cast(%TradeEvent{}, state) do
+    {:no_reply, state}
   end
 
   defp fetch_tick_size(symbol) do
     Binance.get_exchange_info()
     |> elem(1)
     |> Map.get(:symbols)
-    |> Enum.find(&(&1["symbols"] == symbol))
+    |> Enum.find(&(&1["symbol"] == symbol))
     |> Map.get("filters")
     |> Enum.find(&(&1["filterType"] == "PRICE_FILTER"))
     |> Map.get("tickSize")
   end
-end
 
-defmodule State do
-  @enforce_keys [:symbol, :profit_intereval, :tick_size]
-  defstruct [
-    :symbol,
-    :buy_order,
-    :sell_order,
-    :profit_interval,
-    :tick_size
-  ]
+  defp calculate_sell_price(buy_price, profit_interval, tick_size) do
+    fee = "1.001"
+    original_price = D.mult(buy_price, fee)
+
+    net_target_price =
+      D.mult(
+        original_price,
+        D.add("1.0", profit_interval)
+      )
+
+    gross_target_price = D.mult(net_target_price, fee)
+
+    D.to_string(
+      D.mult(
+        D.div_int(gross_target_price, tick_size),
+        tick_size
+      ),
+      :normal
+    )
+  end
 end
